@@ -437,8 +437,12 @@ class CheckProxmox:
 
         url = self.base_url + "/api2/json/access/ticket"
         payload = {"username": self.username, "password": self.password}
+        proxies = {
+            "http": None,
+            "https": None,
+        }
 
-        resp = requests.post(url, json=payload, timeout=5, verify=False)
+        resp = requests.post(url, json=payload, timeout=5, verify=False, proxies=proxies)
         resp.raise_for_status()
 
         result = resp.json()
@@ -464,8 +468,12 @@ class CheckProxmox:
         url = self.base_url + "/api2/json/cluster/resources"
         params = {"type": "vm"}
         cookies = {"PVEAuthCookie": ticket}
+        proxies = {
+            "http": None,
+            "https": None,
+        }
 
-        resp = requests.get(url, params=params, cookies=cookies, timeout=30, verify=False)
+        resp = requests.get(url, params=params, cookies=cookies, timeout=30, verify=False, proxies=proxies)
         resp.raise_for_status()
 
         result = resp.json()
