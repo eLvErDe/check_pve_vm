@@ -43,12 +43,17 @@ import tempfile
 import argparse
 import datetime
 import dataclasses
-from typing import Optional, Dict, Tuple, Union
+from typing import List, Optional, Dict, Tuple, Union
 
+import pytz
 import requests
+import humanize
 import dateutil.parser
 
 requests.packages.urllib3.disable_warnings()  # pylint: disable=no-member
+
+#: Luxembourgish local timezone
+LUX_TZ = pytz.timezone("Europe/Luxembourg")
 
 
 class NagiosException(Exception):
@@ -241,6 +246,160 @@ class VmMetrics:
         )
 
 
+@dataclasses.dataclass
+class BackupVerification:
+    """
+    Repesent las backup verification result
+
+    :param upid: Last backup verification UPID, e.g: UPID:pbs-brt:00000888:000004BE:00000093:66D4E3E0:verificationjob:zfs\\x3av\\x2d2593cfe9\\x2de326:root@pam:
+    :type upid: str
+    :param state: Last backup verification state, e.g: ok
+    :type state: str
+
+    """
+
+    upid: str
+    state: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.upid, str):
+            raise ValueError(f"upid must be instance of str, got {self.upid.__class__.__name__}")
+        if not self.upid:
+            raise ValueError("upid must be a non empty string")
+        if not isinstance(self.state, str):
+            raise ValueError(f"state must be instance of str, got {self.state.__class__.__name__}")
+        if not self.state:
+            raise ValueError("state must be a non empty string")
+
+
+@dataclasses.dataclass
+class VmBackup:
+    """
+    Represent VM backup returned by Proxmox REST API
+
+    See https://pve.proxmox.com/pve-docs/api-viewer/#/nodes/{node}/storage/{storage}/content which is NOT up to date sadly
+
+    :param content: Type of content, e.g: backup
+    :type content: str
+    :param subtype: Subtype of VM, e.g: qemu
+    :type subtype: str
+    :param vmid: VM unique identifier, e.g: 101
+    :type vmid: int
+    :param notes: Optional notes. If they contain multiple lines, only the first one is returned here., e.g: dai-tgr-ana-1.tgr.cita.internal
+    :type notes: str
+    :param format: Format identifier ('raw', 'qcow2', 'subvol', 'iso', 'tgz' ...), e.g: pbs-vm
+    :type format: str
+    :param volid: Volume identifier, e.g: pbs-brt-01:backup/vm/100/2024-08-26T19:00:04Z
+    :type volid: str
+    :param size: Volume size in bytes, e.g: 214753101069
+    :type size: int
+    :param timestamp: Creation time (seconds since the UNIX Epoch), e.g. 1724698804:
+    :type timestamp: datetime.datetime
+    :param encrypted: If whole backup is encrypted, value is the fingerprint or '1'  if encrypted. Only useful for the Proxmox Backup Server storage type.
+    :type encrypted: str
+    :param verification: Last backup verification result, might be None if job has not been verified yet
+    :type verification: BackupVerification, optional
+    """
+
+    content: str
+    subtype: str
+    vmid: int
+    notes: str
+    format: str
+    volid: str
+    size: int
+    ctime: int
+    encrypted: str
+    verification: Optional[BackupVerification]
+
+    @property
+    def timestamp_dt(self) -> datetime.datetime:
+        """
+        Return self.timestamp as datetime.datetime instance
+
+        :getter: Return self.timestamp as datetime.datetime instance
+        """
+
+        return datetime.datetime.fromtimestamp(self.ctime, tz=datetime.timezone.utc)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.content, str):
+            raise ValueError(f"content must be instance of str, got {self.content.__class__.__name__}")
+        if not self.content:
+            raise ValueError("content must be a non empty string")
+        if not isinstance(self.subtype, str):
+            raise ValueError(f"subtype must be instance of str, got {self.subtype.__class__.__name__}")
+        if not self.subtype:
+            raise ValueError("subtype must be a non empty string")
+        if not isinstance(self.vmid, int):
+            raise ValueError(f"vmid must be instance of int, got {self.vmid.__class__.__name__}")
+        if self.vmid < 0:
+            raise ValueError("vmid must be a positive integer")
+        if not isinstance(self.notes, str):
+            raise ValueError(f"notes must be instance of str, got {self.notes.__class__.__name__}")
+        if not self.notes:
+            raise ValueError("notes must be a non empty string")
+        if not isinstance(self.format, str):
+            raise ValueError(f"format must be instance of str, got {self.format.__class__.__name__}")
+        if not self.format:
+            raise ValueError("format must be a non empty string")
+        if not isinstance(self.volid, str):
+            raise ValueError(f"volid must be instance of str, got {self.volid.__class__.__name__}")
+        if not isinstance(self.size, int):
+            raise ValueError(f"size must be instance of int, got {self.size.__class__.__name__}")
+        if self.size < 0:
+            raise ValueError("size must be a positive integer")
+        if not isinstance(self.ctime, int):
+            raise ValueError(f"ctime must be instance of int, got {self.ctime.__class__.__name__}")
+        if self.ctime < 0:
+            raise ValueError("ctime must be a positive integer")
+        if not isinstance(self.encrypted, str):
+            raise ValueError(f"encrypted must be instance of str, got {self.encrypted.__class__.__name__}")
+        if not self.encrypted:
+            raise ValueError("encrypted must be a non empty string")
+        if self.verification is not None:
+            if not isinstance(self.verification, BackupVerification):
+                raise ValueError(f"verification must be instance of BackupVerification or None, got {self.verification.__class__.__name__}")
+
+    @classmethod
+    def from_api_payload(cls, payload: Dict) -> "VmBackup":
+        """
+        Build an instance of this class from Proxmox REST API payload
+
+        :param payload: Single entry of API payload representing state of a VM backup
+        :type payload: dict
+        :raise AssertionError: If provided payload is incorrect
+        :return: Instance of VmBackup dataclass
+        :rtype: VmBackup
+        """
+
+        assert isinstance(payload, dict), "payload parameter must be a dict, got %s" % payload.__class__.__name__
+        required_keys = ["encrypted", "ctime", "size", "volid", "format", "notes", "vmid", "subtype", "content"]
+        has_verification = "verification" in payload  # This key might be missing while job is still being done
+        for required_key in required_keys:
+            assert required_key in payload, f"payload parameter must have a {required_key} key"
+
+        if has_verification:
+            required_keys_verification = ["state", "upid"]
+            for required_key in required_keys_verification:
+                assert required_key in payload["verification"], f'payload["verification"] parameter must have a {required_key} key'
+
+        verification = BackupVerification(state=payload["verification"]["state"], upid=payload["verification"]["upid"]) if has_verification else None
+
+        return cls(
+            encrypted=payload["encrypted"],
+            verification=verification,
+            ctime=payload["ctime"],
+            size=payload["size"],
+            volid=payload["volid"],
+            format=payload["format"],
+            notes=payload["notes"],
+            vmid=payload["vmid"],
+            subtype=payload["subtype"],
+            content=payload["content"],
+        )
+
+
 class NagiosArgumentParser(argparse.ArgumentParser):
     """
     Inherit from ArgumentParser but exit with Nagios code 3 (Unknown) in case of argument error
@@ -342,6 +501,59 @@ class CheckProxmox:
 
         parsed = VmMetrics.from_api_payload(vm)
         return parsed
+
+    def get_vm_backups(self, node: str, storage: str, content: Optional[str], vmid: Optional[int]) -> List[VmBackup]:
+        """
+        Get backups of nodes
+
+        :param node: The cluster node name, e.g: dai-tgr-lt-nord-proxmox
+        :type node: str
+        :param storage: The storage identifier, e.g: pbs-brt-01
+        :type storage: str
+        :param content: Type of content, e.g: backup
+        :type content: str, Optional
+        :param vmid: Virtual machine id, e.g.: 101
+        :type vmid: int, Optional
+        :return: List of dataclass representing virtual machine backups
+        :rtype: List[VmBackup]
+        """
+
+        assert isinstance(node, str) and node, "node parameter must be a non-empty string"
+        assert isinstance(storage, str) and storage, "storage parameter must be a non-empty string"
+        if content is not None:
+            assert isinstance(content, str) and content, "content parameter must be a non-empty string"
+        if vmid is not None:
+            assert isinstance(vmid, int) and vmid > 0, "vmid parameter must be an instance of int and must be greater than 0"
+
+        ticket = self.get_ticket()
+
+        url = self.base_url + f"/api2/json/nodes/{node}/storage/{storage}/content"
+        params = {}
+        if content is not None:
+            params["content"] = content
+        if vmid is not None:
+            params["vmid"] = vmid
+        cookies = {"PVEAuthCookie": ticket}
+        proxies = {
+            "http": None,
+            "https": None,
+        }
+
+        resp = requests.get(url, params=params, cookies=cookies, timeout=30, verify=False, proxies=proxies)
+        resp.raise_for_status()
+
+        result_backups = resp.json()
+        assert isinstance(result_backups, dict), f"expects dict when requesting backups, got {result_backups.__class__.__name__}"
+        assert "data" in result_backups, "expects data key in response dict when requesting backups"
+        backup_list = result_backups["data"]
+        assert isinstance(backup_list, list), f"expects data key value in response to be a list when requesting backups, got {backup_list.__class__.__name__}"
+
+        vm_backups: List[VmBackup] = []
+        for backup in backup_list:
+            temp_backup = VmBackup.from_api_payload(backup)
+            vm_backups.append(temp_backup)
+
+        return vm_backups
 
     def get_current_previous_states(self, name_or_id: str, check_type: str) -> Tuple[VmMetrics, VmMetrics, float]:
         """
@@ -641,6 +853,139 @@ class CheckProxmox:
             "VM %s (%s) is up for %d seconds (started at %s)" % (current_vm_state.name, current_vm_state.status, current_vm_state.uptime, start_iso8601)
         )
 
+    def evaluate_backups(
+        self,
+        name_or_id: str,
+        storage: str,
+        content: Optional[str],
+        max_newest_backup_age_warning: Optional[datetime.timedelta],
+        max_newest_backup_age_critical: Optional[datetime.timedelta],
+        max_oldest_backup_age_warning: Optional[datetime.timedelta],
+        max_oldest_backup_age_critical: Optional[datetime.timedelta],
+    ) -> None:
+        """
+        Evaluate the newest and oldest backup with the thresholds. Furthermore, checks size and status of all backups
+
+        :param name_or_id: Virtual machine name or id
+        :type name_or_id: str
+        :param storage: The storage identifier, e.g: pbs-brt-01
+        :type storage: str
+        :param content: Type of content, e.g: backup
+        :type content: str, Optional
+        :param max_newest_backup_age_warning: Maximum days, hours, minutes or secondes of newest backup to trigger warning
+        :type max_newest_backup_age_warning: datetime.timedelta, optional
+        :param max_newest_backup_age_critical: Maximum days, hours, minutes or secondes of newest backup to trigger critical
+        :type max_newest_backup_age_critical: datetime.timedelta, optional
+        :param max_oldest_backup_age_warning: Maximum days, hours, minutes or secondes of oldest backup to trigger warning
+        :type max_oldest_backup_age_warning: datetime.timedelta, optional
+        :param max_oldest_backup_age_critical: Maximum days, hours, minutes or secondes of oldest backup to trigger critical
+        :type max_oldest_backup_age_critical: datetime.timedelta, optional
+        :raise NagiosUnknown: If warning threshold is greater than critical threshold
+        :raise NagiosWarning: If uptime is below warning threshold but above critical one
+        :raise NagiosCritical: If uptime is below critical threshold
+        :raise NagiosOk: If uptime is above both warning and critical thresholds
+        """
+
+        current_vm_state = self.get_vm_status(name_or_id)
+        backups_list = self.get_vm_backups(node=current_vm_state.node, storage=storage, content=content, vmid=current_vm_state.vmid)
+
+        # Check if list is empty
+        if not backups_list:
+            raise NagiosCritical(f"No backup found for VM {current_vm_state.name}.")
+
+        backups_string_content = ""
+        backup_date_details: List[str] = []
+
+        # Check maximum age of newest backup with thresholds warning and critical
+        now = datetime.datetime.now(tz=datetime.timezone.utc)
+        newest_backup = backups_list[-1]
+        newest_backup_timestamp = newest_backup.timestamp_dt
+        newest_backup_delta = now - newest_backup_timestamp
+
+        if max_newest_backup_age_warning is not None and max_newest_backup_age_critical is not None:
+            if max_newest_backup_age_warning >= max_newest_backup_age_critical:
+                raise NagiosUnknown(
+                    f"Threshold max_newest_backup_age_warning ({humanize.precisedelta(max_newest_backup_age_warning)}) cannot be greater or equal to threshold max_newest_backup_age_critical ({humanize.precisedelta(max_newest_backup_age_critical)})"
+                )
+
+        # Compare thresholds if provided
+        if max_newest_backup_age_critical is not None and newest_backup_delta >= max_newest_backup_age_critical:
+            raise NagiosCritical(
+                f'VM "{current_vm_state.name}": The newest backup {newest_backup.volid} dated at {humanize.precisedelta(newest_backup_delta, minimum_unit="minutes", format="%d")} ago, older than critical threshold {humanize.precisedelta(max_newest_backup_age_critical)}.'
+            )
+        if max_newest_backup_age_warning is not None and newest_backup_delta >= max_newest_backup_age_warning:
+            raise NagiosWarning(
+                f'VM "{current_vm_state.name}": The newest backup {newest_backup.volid} dated at {humanize.precisedelta(newest_backup_delta, minimum_unit="minutes", format="%d")} ago, older than warning threshold {humanize.precisedelta(max_newest_backup_age_warning)}.'
+            )
+        if max_newest_backup_age_critical is not None or max_newest_backup_age_warning is not None:
+            backup_date_details.append(f"newest at {newest_backup.timestamp_dt.astimezone(tz=LUX_TZ).isoformat()}")
+
+        # Check maximum age of oldest backup thresholds warning and critical
+        oldest_backup = backups_list[0]
+        oldest_backup_timestamp = oldest_backup.timestamp_dt
+        oldest_backup_delta = now - oldest_backup_timestamp
+
+        if max_oldest_backup_age_warning is not None and max_oldest_backup_age_critical is not None:
+            if max_oldest_backup_age_warning >= max_oldest_backup_age_critical:
+                raise NagiosUnknown(
+                    f"Threshold max_oldest_backup_age_warning ({humanize.precisedelta(max_oldest_backup_age_warning)}) cannot be greater or equal to threshold max_oldest_backup_age_critical ({humanize.precisedelta(max_oldest_backup_age_critical)})"
+                )
+
+        # Compare thresholds if provided
+        if max_oldest_backup_age_critical is not None and oldest_backup_delta >= max_oldest_backup_age_critical:
+            raise NagiosCritical(
+                f'VM "{current_vm_state.name}": The oldest backup {oldest_backup.volid} dated at {humanize.precisedelta(oldest_backup_delta, minimum_unit="minutes", format="%d")} ago, older than critical threshold {humanize.precisedelta(max_oldest_backup_age_critical)}.'
+            )
+        if max_oldest_backup_age_warning is not None and oldest_backup_delta >= max_oldest_backup_age_warning:
+            raise NagiosWarning(
+                f'VM "{current_vm_state.name}": The oldest backup {oldest_backup.volid} dated at {humanize.precisedelta(oldest_backup_delta, minimum_unit="minutes", format="%d")} ago, older than warning threshold {humanize.precisedelta(max_oldest_backup_age_warning)}.'
+            )
+        if max_oldest_backup_age_critical is not None or max_oldest_backup_age_warning is not None:
+            backup_date_details.append(f"oldest at {oldest_backup.timestamp_dt.astimezone(tz=LUX_TZ).isoformat()}")
+
+        # Check status and size:
+        # TODO: Not the best idea to put static value to compare with backup's size
+        status_size_errors: str = ""
+        for backup in backups_list:
+            if backup.size < 1000:
+                status_size_errors += f'Backup "{backup.volid}" dated at {backup.timestamp_dt.astimezone(tz=LUX_TZ).isoformat()} has a size issue, got size {self.sizeof_fmt(num=backup.size, suffix="B")} \n'
+            if backup.verification is not None and backup.verification.state not in ["ok"]:
+                status_size_errors += f'Backup "{backup.volid}" dated at {backup.timestamp_dt.astimezone(tz=LUX_TZ).isoformat()} has a status issue, got status {backup.verification.state} \n'
+
+        if status_size_errors:
+            raise NagiosCritical(f"Issues detected for VM {current_vm_state.name}: \n{status_size_errors}")
+
+        # If no threshold is provided show newest and oldest backup
+        if not backup_date_details:
+            backup_date_details.append(f"newest at {newest_backup.timestamp_dt.astimezone(tz=LUX_TZ).isoformat()}")
+            backup_date_details.append(f"oldest at {oldest_backup.timestamp_dt.astimezone(tz=LUX_TZ).isoformat()}")
+
+        # Print the 10 recent backups
+        for backup in backups_list[-10:][::-1]:
+            verification_status = backup.verification.state if backup.verification is not None else 'not verified yet'
+            backups_string_content += f'Backup "{backup.volid}" at {backup.timestamp_dt.astimezone(tz=LUX_TZ).isoformat()} with state "{verification_status}" and size "{self.sizeof_fmt(backup.size, suffix="B")}" \n'
+        raise NagiosOk(f"{len(backups_list)} backups for VM {current_vm_state.name}: {', '.join(backup_date_details)} \n{backups_string_content}")
+
+
+def duration_from_string(value: str) -> datetime.timedelta:
+    """
+    Custom argparse type to convert days=1 or minutes=5 into int
+    """
+
+    if not value.strip():
+        raise argparse.ArgumentTypeError("Invalid empty duration must be passed like days=1, hours=1, minutes=5 or seconds=30")
+
+    re_match = re.match(r"^(days|hours|minutes|seconds)=([0-9]+)$", value)
+    if not re_match:
+        raise argparse.ArgumentTypeError(f"Invalid duration {value} must be passed like days=1, hours=1, minutes=5 or seconds=30")
+
+    unit = re_match.group(1)
+    number = int(re_match.group(2))
+    if unit in ["seconds", "minutes", "hours", "days"]:
+        return datetime.timedelta(**{unit: number})
+
+    raise NotImplementedError(f"Unsupported unit {unit}, should never happen unless code is broken")
+
 
 def parse_args() -> argparse.Namespace:  # pylint: disable=too-many-branches,too-many-statements
     """
@@ -693,10 +1038,45 @@ def parse_args() -> argparse.Namespace:  # pylint: disable=too-many-branches,too
         "--min-seconds-critical", type=int, nargs="?", required=False, help="Minimum uptime in seconds to trigger critical, -1 as null value", metavar="600"
     )
 
+    backup_parser = subparsers.add_parser("backup", help="Check backups")
+    backup_parser.add_argument("--backup-storage", type=str, nargs="?", required=True, help="Storage identifier, e.g.: pbs-brt-01")
+    backup_parser.add_argument(
+        "--max-newest-backup-age-warning",
+        type=duration_from_string,
+        nargs="?",
+        required=False,
+        help="Maximum age of newest backup to issue warning state, unit=count, unit being days, hours, minutes or seconds",
+        metavar="days=1",
+    )
+    backup_parser.add_argument(
+        "--max-newest-backup-age-critical",
+        type=duration_from_string,
+        nargs="?",
+        required=False,
+        help="Maximum age of newest backup to issue critical state, unit=count, unit being days, hours, minutes or seconds",
+        metavar="days=2",
+    )
+    backup_parser.add_argument(
+        "--max-oldest-backup-age-warning",
+        type=duration_from_string,
+        nargs="?",
+        required=False,
+        help="Maximum age of oldest backup to issue warning state, unit=count, unit being days, hours, minutes or seconds",
+        metavar="days=300",
+    )
+    backup_parser.add_argument(
+        "--max-oldest-backup-age-critical",
+        type=duration_from_string,
+        nargs="?",
+        required=False,
+        help="Maximum age of oldest backup to issue critical state, unit=count, unit being days, hours, minutes or seconds",
+        metavar="days=365",
+    )
+
     args = parser.parse_args()
 
     if args.action is None:
-        parser.error("An action must be specified (diskio, netio or uptime)")
+        parser.error("An action must be specified (diskio, netio, uptime or backup)")
 
     if args.action == "diskio":
         if args.read_warning == -1:
@@ -738,7 +1118,6 @@ def parse_args() -> argparse.Namespace:  # pylint: disable=too-many-branches,too
 
 
 if __name__ == "__main__":
-
     CONFIG = parse_args()
 
     try:
@@ -761,6 +1140,18 @@ if __name__ == "__main__":
             )
         elif CONFIG.action == "uptime":
             PROXMOX.evaluate_uptime(name_or_id=CONFIG.vm, min_seconds_warning=CONFIG.min_seconds_warning, min_seconds_critical=CONFIG.min_seconds_critical)
+        elif CONFIG.action == "backup":
+            # check the newest backup timestamp with the max_newest_backup_age_warning and max_newest_backup_age_critical
+            # check the oldest backup timestamp with the max_oldest_backup_age_warning and max_oldest_backup_age_critical
+            PROXMOX.evaluate_backups(
+                name_or_id=CONFIG.vm,
+                storage=CONFIG.backup_storage,
+                content=None,
+                max_newest_backup_age_warning=CONFIG.max_newest_backup_age_warning,
+                max_newest_backup_age_critical=CONFIG.max_newest_backup_age_critical,
+                max_oldest_backup_age_warning=CONFIG.max_oldest_backup_age_warning,
+                max_oldest_backup_age_critical=CONFIG.max_oldest_backup_age_critical,
+            )
         else:
             raise ValueError("Unsupported action %s" % CONFIG.action)
     except NagiosOk as exc:
