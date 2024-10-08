@@ -473,7 +473,7 @@ class CheckProxmox:
         assert "data" in result, "expects data key in response dict when requesting auth ticket"
         vm_list = result["data"]
 
-        matching_vms = [x for x in vm_list if name_or_id in [x["name"], x["vmid"]]]
+        matching_vms = [x for x in vm_list if name_or_id in [x["name"], str(x["vmid"])]]
         assert matching_vms, "Unable to find any VM with name or id %s" % name_or_id
         assert len(matching_vms) == 1, "Multiple VM (%d) with name or id %s found" % (len(matching_vms), name_or_id)
         vm = matching_vms[0]  # pylint: disable=invalid-name
