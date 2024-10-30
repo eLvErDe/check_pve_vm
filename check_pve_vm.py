@@ -183,7 +183,7 @@ class VmMetrics:
         assert isinstance(self.mem, int) and self.mem >= 0, "mem parameter must be a positive or zero integer"
         assert isinstance(self.maxcpu, int) and self.maxcpu > 0, "maxcpu parameter must be a positive integer"
         assert isinstance(self.cpu, (float, int)) and self.cpu >= 0, "cpu parameter must be a positive or zero integer or float"
-        assert isinstance(self.maxdisk, int) and self.maxdisk > 0, "maxdisk parameter must be a positive integer"
+        assert isinstance(self.maxdisk, int) and self.maxdisk >= 0, "maxdisk parameter must be a positive or zero integer"
         assert isinstance(self.disk, int) and self.disk >= 0, "disk parameter must be a positive or zero integer"
         self.cpu = float(self.cpu)
 
